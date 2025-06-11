@@ -4,6 +4,7 @@ import (
 	"bank-management/middleware"
 	"bank-management/models"
 	"bank-management/utils"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -117,26 +118,45 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB) {
 			}
 
 			var fromAccount, toAccount models.Account
-			if err := db.First(&fromAccount, transfer.FromAccountID).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Source account not found"})
+
+			err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.First(&fromAccount, transfer.FromAccountID).Error; err != nil {
+					return err
+				}
+
+				if err := tx.First(&toAccount, transfer.ToAccountID).Error; err != nil {
+					return err
+				}
+
+				if fromAccount.Balance < transfer.Amount {
+					return errors.New("insufficient balance")
+				}
+
+				fromAccount.Balance -= transfer.Amount
+				toAccount.Balance += transfer.Amount
+
+				if err := tx.Save(&fromAccount).Error; err != nil {
+					return err
+				}
+				if err := tx.Save(&toAccount).Error; err != nil {
+					return err
+				}
+
+				return nil
+			})
+
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+					return
+				}
+				if err.Error() == "insufficient balance" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-
-			if err := db.First(&toAccount, transfer.ToAccountID).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Target account not found"})
-				return
-			}
-
-			if fromAccount.Balance < transfer.Amount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient balance"})
-				return
-			}
-
-			fromAccount.Balance -= transfer.Amount
-			toAccount.Balance += transfer.Amount
-
-			db.Save(&fromAccount)
-			db.Save(&toAccount)
 
 			c.JSON(http.StatusOK, gin.H{"message": "Transfer completed successfully"})
 		})
